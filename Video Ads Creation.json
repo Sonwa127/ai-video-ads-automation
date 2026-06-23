@@ -1,0 +1,838 @@
+{
+  "name": "Video Ads Creation",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "// --- Input format: OpenAI Chat response (like the one you pasted) ---\n// Expected fields: $json.message.content\n\nlet raw = $json.message?.content || $json.content;\nif (!raw) throw new Error(\"No GPT output found.\");\n\n// --- Clean & Parse JSON safely ---\nlet parsed;\ntry {\n  raw = raw.replace(/```json|```/g, \"\").trim();\n  parsed = JSON.parse(raw);\n} catch (err) {\n  throw new Error(\"Invalid JSON in GPT output: \" + err.message);\n}\n\n// --- Extract scenes & music mood ---\nconst scenes = parsed.scenes || [];\nconst musicMood = parsed.music_mood || \"cinematic\";\n\n// --- Collect keywords & SRT captions ---\nlet srt = \"\";\nlet counter = 1;\nconst bestKeywords = [];\n\nfunction toTimestamp(seconds) {\n  const s = Math.floor(Number(seconds));\n  const h = String(Math.floor(s / 3600)).padStart(2, \"0\");\n  const m = String(Math.floor((s % 3600) / 60)).padStart(2, \"0\");\n  const sec = String(s % 60).padStart(2, \"0\");\n  return `${h}:${m}:${sec},000`;\n}\n\nscenes.forEach(scene => {\n  if (scene.keyword) bestKeywords.push(scene.keyword);\n\n  if (scene.text && scene.timing) {\n    const [start, end] = scene.timing.replace(/s/g, \"\").split(\"-\");\n    srt += `${counter}\\n${toTimestamp(start)} --> ${toTimestamp(end)}\\n${scene.text}\\n\\n`;\n    counter++;\n  }\n});\n\n// --- Return structured data for downstream nodes ---\nreturn [\n  {\n    json: {\n      scenes,\n      bestKeywords,\n      srt,\n      musicMood\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -5088,
+        1840
+      ],
+      "id": "db93b57c-0a69-480f-9b83-c1ac357e5806",
+      "name": "ParseOutput1",
+      "notes": "const raw = $json.message?.content || $json.content || null;\nif (!raw) throw new Error(\"No content found in AI output.\");\n\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  throw new Error(\"Could not parse AI JSON: \" + e.message + \" | Raw: \" + raw);\n}\n\nconst scenes = [];\nconst bestKeywords = [];\nlet srt = \"\";\nlet counter = 1;\n\nfunction toTimestamp(seconds) {\n  const sec = parseInt(seconds, 10);\n  const h = String(Math.floor(sec / 3600)).padStart(2, \"0\");\n  const m = String(Math.floor((sec % 3600) / 60)).padStart(2, \"0\");\n  const s = String(sec % 60).padStart(2, \"0\");\n  return `${h}:${m}:${s},000`;\n}\n\n(parsed.scenes || []).forEach(scene => {\n  const keywords = scene.keywords || [];\n  const filtered = keywords.filter(k =>\n    ![\"promotion\", \"discount\", \"cta\", \"offer\"].some(weak =>\n      k.toLowerCase().includes(weak)\n    )\n  );\n  const list = filtered.length > 0 ? filtered : keywords;\n  const best = list.length > 0 ? list.reduce((a, b) => (a.length >= b.length ? a : b)) : null;\n  if (best) bestKeywords.push(best);\n\n  scenes.push({\n    ...scene,\n    keyword: best\n  });\n\n  // Use ChatGPT's provided timing directly\n  if (scene.caption && scene.timing) {\n    const [start, end] = scene.timing.replace(/s/g, \"\").split(\"-\");\n    srt += `${counter}\\n${toTimestamp(start)} --> ${toTimestamp(end)}\\n${scene.caption}\\n\\n`;\n    counter++;\n  }\n});\n\nreturn [{\n  json: {\n    scenes,\n    bestKeywords,\n    srt\n  }\n}];\n"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.elevenlabs.io/v1/text-to-speech/dXtC3XhB9GtPusIpNtQx",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"{{$json.scenes.map(scene => scene.text).join(' ')}}\",\n  \"voice_settings\": {\n    \"stability\": 0.6,\n    \"similarity_boost\": 0.8\n  }\n}\n",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file",
+              "outputPropertyName": "voiceover.mp3"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -4864,
+        1696
+      ],
+      "id": "9374be4c-5cc1-44f5-8713-09f8bf396101",
+      "name": "VoiceOver1",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6MdMJhN5W28Slbee",
+          "name": "Apollo"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-5",
+          "mode": "list",
+          "cachedResultName": "GPT-5"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "=You are an expert cinematic ad writer and director.\nYou create 30-second ad storyboards that visually reflect the brand or product mentioned in the input,\nwhile keeping all visual keywords searchable on stock-video sites (Pexels, Shutterstock, etc.).\n\nAlways return valid JSON only — no markdown, no commentary.\n\n🎯 TASK\n\nGenerate a 5–8-scene JSON storyboard (≈ 25 s total) using\nHook → Problem → Solution → Benefit → Call-to-Action.\n\nEach scene must include:\n\nrole — one of \"hook\", \"problem\", \"solution\", \"benefit\", \"call-to-action\".\n\ntext — one natural, spoken-style line (≈ 10 words).\n\nkeyword — one short, brand-anchored but stock-searchable visual (1–4 words).\n\nKeep the brand category visible (cola / fitness / travel / tech / real estate / fashion / beauty / finance, etc.).\n\nCombine generic stock terms with brand context.\n\n✅ Examples: \"pouring cola drink\", \"ice cubes in glass\", \"friends sharing soda\", \"runner tying shoes\", \"city skyline sunset\".\n\n❌ Avoid poetic or abstract words (darkness, energy, neon, vibe).\n\nUse tangible, filmable visuals that fit the brand world.\n\ntiming — \"start-end\" (≈ 4–6 s each; total ≈ 30 s).\n\n🧠 INPUT RULES\n\nThe user’s input may be any length or style (sentence, paragraph, landing page, transcript).\nYou must read the input and identify:\n\nBrand / product / category\n\nEmotional tone\n\nAudience & call-to-action\n\nThen summarize them into short, cinematic lines and visuals centered on that brand world.\nIf no brand name is given, infer the product type and stay literal\n(e.g., “cola drink”, “fitness shake”, “real-estate home”).\n\n🎥 VISUAL STYLE RULES\n\nEach keyword must describe a real shot (person, object, or action).\n\nAlways keep it brand-category + action (“cola drink pouring”, “coffee steam rising”).\n\nPrefer close-up, sensory, human moments.\n\nNo lighting adjectives or camera terms.\n\n🎵 MUSIC MOOD RULE\n\nAt the end of the JSON, add a \"music_mood\" field describing the background soundtrack type that fits the ad’s tone and brand.\nPossible examples:\n\"upbeat pop\", \"cinematic ambient\", \"soft acoustic\", \"energetic electronic\", \"calm piano\", \"luxury lounge\", \"corporate tech\", \"motivational rock\", \"inspirational cinematic\".\n\nChoose the mood that best supports the emotional arc of the ad.\n\n⏱ TIMING RULES\n\nTotal ≈ 30 seconds\n\n5 – 8 scenes\n\nEach ≈ 4–6 seconds (\"0-5s\", \"5-10s\", …)\n\nCombined voiceover ≈ 15 – 22 seconds spoken time.\n\n📦 OUTPUT FORMAT\n{\n  \"scenes\": [\n    {\n      \"role\": \"hook\",\n      \"text\": \"Voiceover line (≈10–18 words).\",\n      \"keyword\": \"brand-anchored, stock-ready visual\",\n      \"timing\": \"0-5s\"\n    }\n  ],\n  \"music_mood\": \"background soundtrack style\"\n}",
+              "role": "system"
+            },
+            {
+              "content": "={{ $json.chatInput }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.8,
+      "position": [
+        -5440,
+        1840
+      ],
+      "id": "34b6f31a-9439-4c80-9bf1-c67254eedcdf",
+      "name": "Scripter1"
+    },
+    {
+      "parameters": {
+        "jsCode": "// === Pexels + Voiceover + Background Music → Shotstack JSON ===\n\n// ---------- 1. Gather Inputs ----------\nconst videos = $json.videos || [];\nconst music = $json.selectedMusic?.direct || null;\nconst voiceover = $json.directUrl || null;\nconst srtText = $json.data || $json.srt || null;\n\n// ---------- 2. Parse SRT for exact voiceover duration ----------\nfunction toSeconds(ts) {\n  const [h, m, s] = ts.split(\":\");\n  const [sec, ms] = s.split(\",\");\n  return (+h) * 3600 + (+m) * 60 + (+sec) + (+ms || 0) / 1000;\n}\n\nfunction parseSRT(srt) {\n  if (!srt) return [];\n  const blocks = srt.trim().split(/\\n\\n+/);\n  return blocks\n    .map((block) => {\n      const lines = block.split(\"\\n\");\n      if (lines.length < 2) return null;\n      const [start, end] = lines[1].split(\" --> \");\n      return { start: toSeconds(start), end: toSeconds(end) };\n    })\n    .filter(Boolean);\n}\n\n// Parse and get duration\nconst captions = parseSRT(srtText);\nconst voiceDuration = captions.length > 0 ? captions[captions.length - 1].end : null;\n\n// ---------- 3. Determine target duration ----------\nlet targetDuration;\nif (voiceDuration && voiceDuration > 0) {\n  targetDuration = voiceDuration;  // ✅ use exact detected duration\n} else {\n  targetDuration = 30;             // ⚙️ fallback only when missing\n}\n\n// ---------- 4. Build video clips ----------\nconst numClips = Math.min(6, videos.length);\nconst clipLength = targetDuration / numClips;\n\nlet currentStart = 0;\nconst videoClips = videos.slice(0, numClips).map((v, i) => {\n  const hdFile =\n    v.video_files.find((f) => f.width >= 1080) ||\n    v.video_files.find((f) => f.width >= 720) ||\n    v.video_files[0];\n\n  const isLast = i === numClips - 1;\n  const length = isLast ? targetDuration - currentStart : clipLength;\n\n  const clip = {\n    asset: { type: \"video\", src: hdFile.link },\n    fit: \"contain\",\n    start: currentStart,\n    length,\n  };\n  currentStart += length;\n  return clip;\n});\n\n// ---------- 5. Audio Layers ----------\nconst audioTracks = [];\n\n// 🎙 Voiceover\nif (voiceover) {\n  audioTracks.push({\n    clips: [\n      {\n        asset: {\n          type: \"audio\",\n          src: voiceover,\n          volume: 1.0,\n        },\n        start: 0,\n        length: targetDuration,\n      },\n    ],\n  });\n}\n\n// 🎵 Background Music (fade-out at end)\nif (music) {\n  const fadeStart = Math.max(targetDuration - 3, 0);\n  audioTracks.push({\n    clips: [\n      {\n        asset: { type: \"audio\", src: music, volume: 0.3 },\n        start: 0,\n        length: fadeStart,\n      },\n      {\n        asset: { type: \"audio\", src: music, volume: 0.1 },\n        start: fadeStart,\n        length: targetDuration - fadeStart,\n      },\n    ],\n  });\n}\n\n// ---------- 6. Final Payload ----------\nconst renderJson = {\n  timeline: {\n    background: \"#000000\",\n    tracks: [{ clips: videoClips }, ...audioTracks],\n  },\n  output: {\n    format: \"mp4\",\n    size: { width: 1080, height: 1080 },\n  },\n};\n\nreturn [{ json: renderJson }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3744,
+        1504
+      ],
+      "id": "b3c55067-0e5b-4742-aceb-60317757094f",
+      "name": "GETURL1"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.pexels.com/videos/search?query={{ $('ParseOutput1').item.json.bestKeywords }}&per_page=10&page={{Math.floor(Math.random() * 5) + 1}}&orientation=portrait\n",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"page\": 1,\n  \"per_page\": 10,\n  \"videos\": [\n    {\n      \"id\": 8572,\n      \"duration\": 12,\n      \"video_files\": [\n        {\n          \"id\": 123,\n          \"quality\": \"hd\",\n          \"file_type\": \"video/mp4\",\n          \"link\": \"https://player.vimeo.com/external/12345.mp4\"\n        }\n      ]\n    }\n  ]\n}\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -4192,
+        1328
+      ],
+      "id": "6e19655e-fc82-4969-aed4-5240aa55c602",
+      "name": "B-Rolling1"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 4,
+        "options": {
+          "includeUnpaired": true
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -3968,
+        1472
+      ],
+      "id": "adaba79f-c4b2-475d-8ea9-515dba4bb65c",
+      "name": "Merge2"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Input: Google Drive Upload node output\n// Goal: create a direct-download URL for Shotstack\n\nconst fileId = $json.id; \nconst directUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;\n\nreturn [\n  {\n    json: {\n      fileId,\n      directUrl\n    }\n  }\n];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4416,
+        1408
+      ],
+      "id": "2913ea90-f6bd-49c7-b320-b80fb58650f1",
+      "name": "GetDirectURL1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.shotstack.io/v1/render",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3520,
+        1504
+      ],
+      "id": "a56f5454-776c-429d-92c4-59d130d95f9d",
+      "name": "VideoRendering1",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6MdMJhN5W28Slbee",
+          "name": "Apollo"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "=https://api.shotstack.io/v1/render/{{ $json.response.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {}
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -3072,
+        1504
+      ],
+      "id": "33317e13-838a-41eb-9f14-0633b51a84eb",
+      "name": "GetVideo1",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6MdMJhN5W28Slbee",
+          "name": "Apollo"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "amount": 90
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -3296,
+        1504
+      ],
+      "id": "a127a9da-9fcc-4ddb-b259-0523ccc5de2b",
+      "name": "60secs1",
+      "webhookId": "756afe39-372a-46c8-9be8-8c6846591090"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.response.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "file"
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1952,
+        1616
+      ],
+      "id": "f9543dfd-ee43-4a6f-987d-98d00cbfa7aa",
+      "name": "GetBinary1"
+    },
+    {
+      "parameters": {
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "1VTJoN9Yu4kM4BoOl5ud7ZSpa3Gqqy1bF",
+          "mode": "list",
+          "cachedResultName": "N8N",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1VTJoN9Yu4kM4BoOl5ud7ZSpa3Gqqy1bF"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -1728,
+        1616
+      ],
+      "id": "f613e6f1-1be4-4667-8fb1-9083120800c3",
+      "name": "Upload Video Ad1"
+    },
+    {
+      "parameters": {
+        "inputDataFieldName": "=data",
+        "name": "caption",
+        "driveId": {
+          "__rl": true,
+          "value": "=My Drive",
+          "mode": "id"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "1VTJoN9Yu4kM4BoOl5ud7ZSpa3Gqqy1bF",
+          "mode": "list",
+          "cachedResultName": "N8N",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1VTJoN9Yu4kM4BoOl5ud7ZSpa3Gqqy1bF"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -3296,
+        1792
+      ],
+      "id": "52a5894c-0cc1-42b5-92ba-fb9e8ec244fc",
+      "name": "Upload SRT1"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -2848,
+        1616
+      ],
+      "id": "439c77e3-bfd2-4665-82fe-0c6500299165",
+      "name": "Merge3"
+    },
+    {
+      "parameters": {
+        "amount": 90
+      },
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -2400,
+        1616
+      ],
+      "id": "0aa6a32a-07a4-4c9c-9573-c3a94d956028",
+      "name": "Wait1",
+      "webhookId": "5d81af78-e9aa-48ff-888e-d45004f52cea"
+    },
+    {
+      "parameters": {
+        "jsCode": "const fileId = $json.id;\nconst captionUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;\n\nreturn [{\n  json: {\n    captionUrl\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3072,
+        1792
+      ],
+      "id": "afa4b49f-6bd9-4b66-a2d6-b720bde29fe6",
+      "name": "Get srt.URL1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.shotstack.io/edit/v1/render",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"timeline\": {\n    \"tracks\": [\n      {\n        \"clips\": [\n          {\n            \"asset\": {\n              \"type\": \"caption\",\n              \"src\": \"{{ $json.captionUrl }}\",\n              \"font\": {\n                \"family\": \"Montserrat SemiBold\",\n                \"size\": 42,\n                \"color\": \"#FFFFFF\",\n                \"stroke\": \"#000000\",\n                \"strokeWidth\": 1.5,\n                \"lineHeight\": 1.15\n              },\n              \"background\": {\n                \"color\": \"#000000\",\n                \"opacity\": 0.6,\n                \"padding\": 20,\n                \"borderRadius\": 14\n              },\n              \"width\": 850,\n              \"alignment\": {\n                \"horizontal\": \"center\",\n                \"vertical\": \"bottom\"\n              },\n              \"margin\": {\n                \"top\": 0.1,\n                \"left\": 0.05,\n                \"right\": 0.05\n              }\n            },\n            \"start\": 0,\n            \"length\": \"end\",\n            \"offset\": {\n              \"x\": 0,\n              \"y\": -0.56\n            }\n          }\n        ]\n      },\n      {\n        \"clips\": [\n          {\n            \"asset\": {\n              \"type\": \"video\",\n              \"src\": \"{{ $json.response.url }}\"\n            },\n            \"start\": 0,\n            \"length\": \"auto\"\n          }\n        ]\n      }\n    ]\n  },\n  \"output\": {\n    \"format\": \"mp4\",\n    \"size\": {\n      \"width\": 1080,\n      \"height\": 1920\n    }\n  }\n}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2624,
+        1616
+      ],
+      "id": "3f86f7af-beb9-46ae-a065-93dc838dd2c2",
+      "name": "Caption Overlay1"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.shotstack.io/edit/v1/render/{{ $json.response.id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "response": {}
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2176,
+        1616
+      ],
+      "id": "1e3b6893-d384-4133-b331-a4ba76fc830c",
+      "name": "Get Video1",
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "6MdMJhN5W28Slbee",
+          "name": "Apollo"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "inputDataFieldName": "voiceover.mp3",
+        "name": "voiceover.mp3",
+        "driveId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "My Drive"
+        },
+        "folderId": {
+          "__rl": true,
+          "value": "1VTJoN9Yu4kM4BoOl5ud7ZSpa3Gqqy1bF",
+          "mode": "list",
+          "cachedResultName": "N8N",
+          "cachedResultUrl": "https://drive.google.com/drive/folders/1VTJoN9Yu4kM4BoOl5ud7ZSpa3Gqqy1bF"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [
+        -4640,
+        1408
+      ],
+      "id": "c25d6a49-19f2-412d-95bc-8e28998ab77f",
+      "name": "Upload MP3.1"
+    },
+    {
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "srt",
+        "binaryPropertyName": "=data",
+        "options": {
+          "encoding": "utf8"
+        }
+      },
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [
+        -3520,
+        1792
+      ],
+      "id": "fef37032-d6a0-4ebb-94f1-486d9c22214f",
+      "name": "Convert to File1"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/audio/transcriptions",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "openAiApi",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "=file",
+              "inputDataFieldName": "voiceover.mp3"
+            },
+            {
+              "name": "model",
+              "value": "whisper-1"
+            },
+            {
+              "name": "response_format",
+              "value": "srt"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -4192,
+        1696
+      ],
+      "id": "b2ac4ff2-662a-4564-a280-cfacac3e5678",
+      "name": "Get Caption"
+    },
+    {
+      "parameters": {
+        "jsCode": "function parseTime(str) {\n  const [hms, ms] = str.split(',');\n  const [h, m, s] = hms.split(':').map(Number);\n  return h * 3600 + m * 60 + s + Number(ms) / 1000;\n}\n\nfunction formatTime(seconds) {\n  const h = String(Math.floor(seconds / 3600)).padStart(2, '0');\n  const m = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');\n  const s = String(Math.floor(seconds % 60)).padStart(2, '0');\n  const ms = String(Math.floor((seconds % 1) * 1000)).padStart(3, '0');\n  return `${h}:${m}:${s},${ms}`;\n}\n\nfunction chunkText(text, chunkSize = 7) {\n  const words = text.split(' ');\n  const chunks = [];\n  for (let i = 0; i < words.length; i += chunkSize) {\n    chunks.push(words.slice(i, i + chunkSize).join(' '));\n  }\n  return chunks;\n}\n\nconst srt = $json.data || $json.srt || $json; // Adjust depending on your input\nconst lines = srt.split('\\n');\n\nlet block = [];\nlet counter = 1;\nlet newSrt = '';\n\nfor (let i = 0; i < lines.length; i++) {\n  if (lines[i].trim() === '') {\n    if (block.length >= 3) {\n      const time = block[1];\n      const [start, end] = time.split(' --> ');\n      const startSec = parseTime(start.trim());\n      const endSec = parseTime(end.trim());\n      const duration = endSec - startSec;\n\n      const text = block.slice(2).join(' ');\n      const chunks = chunkText(text, 7);\n\n      const chunkDuration = duration / chunks.length;\n\n      chunks.forEach((chunk, j) => {\n        const chunkStart = startSec + j * chunkDuration;\n        const chunkEnd = chunkStart + chunkDuration;\n        newSrt += `${counter}\\n${formatTime(chunkStart)} --> ${formatTime(chunkEnd)}\\n${chunk}\\n\\n`;\n        counter++;\n      });\n    }\n    block = [];\n  } else {\n    block.push(lines[i]);\n  }\n}\n\nreturn [{ json: { srt: newSrt } }];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3744,
+        1792
+      ],
+      "id": "5e4c8a4a-9ec2-4bb3-8c75-1a4d49c6e8a5",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.chatTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -5664,
+        1840
+      ],
+      "id": "9c2b12d8-710a-440e-a018-9ad16404761d",
+      "name": "When chat message received",
+      "webhookId": "a19874ad-4fcc-41b8-bcb5-30d780615297"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://pundzjmpytshlbcazxqt.supabase.co/functions/v1/voice-over-upload",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "contentType": "multipart-form-data",
+        "bodyParameters": {
+          "parameters": [
+            {
+              "parameterType": "formBinaryData",
+              "name": "voice_over_file",
+              "inputDataFieldName": "voiceover.mp3"
+            },
+            {
+              "name": "user_id",
+              "value": "3f9274e4-c458-4631-a713-fadf08ddc76a"
+            },
+            {
+              "name": "custom_prompt",
+              "value": "={{ $('When chat message received').item.json.chatInput }}"
+            },
+            {
+              "name": "base_prompt",
+              "value": "={{$json.scenes.map(scene => scene.text).join(' ')}}"
+            },
+            {
+              "name": "video_type",
+              "value": "voiceover"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -4640,
+        1840
+      ],
+      "id": "ee8895e1-bd7d-4984-a791-66e9c0074004",
+      "name": "HTTP Request",
+      "disabled": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// 🎵 List of your Google Drive music URLs\nconst musicLinks = [\n  \"https://drive.google.com/file/d/1N7uQOJavWoB934jeAf-BRQ7VGfkLD84J/view?usp=drive_link\",\n  \"https://drive.google.com/file/d/1pe7aVFZRtcIR7k1QpS9b1dp2H6jfkFPV/view?usp=drive_link\",\n  \"https://drive.google.com/file/d/17xPY6Oq9JfKVnehqUVMLMk_Kb8JW_R8D/view?usp=drive_link\",\n  \"https://drive.google.com/file/d/1c3w3DKlFBe5xJvu7KgE7Lhxbyq2-KXl8/view?usp=drive_link\",\n  \"https://drive.google.com/file/d/1xbvCSgYWDR3Jossn7o5HsMgdfMX1LG5E/view?usp=drive_link\"\n];\n\n// 🎼 Optional genre labels (in same order as above)\nconst genres = [\n  \"Cinematic Inspiration\",\n  \"Ambient Flow\",\n  \"Uplifting Corporate\",\n  \"Calm Piano\",\n  \"Energetic Beat\"\n];\n\n// 🔄 Convert to direct download format\nconst convertToDirect = (link) => {\n  const match = link.match(/\\/d\\/(.*?)(\\/|$)/);\n  if (match && match[1]) {\n    return `https://drive.google.com/uc?export=download&id=${match[1]}`;\n  }\n  return link; // fallback if not a Drive link\n};\n\n// 🧠 Map all links\nconst allTracks = musicLinks.map((link, index) => ({\n  name: genres[index] || `Track ${index + 1}`,\n  original: link,\n  direct: convertToDirect(link)\n}));\n\n// 🎲 Pick a random one\nconst selected = allTracks[Math.floor(Math.random() * allTracks.length)];\n\n// ✅ Output result\nreturn [{\n  json: {\n    selectedMusic: selected,\n    allTracks: allTracks\n  }\n}];\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -4192,
+        1984
+      ],
+      "id": "3653da0e-985d-4b9e-8197-c10b97d7a1fe",
+      "name": "Code in JavaScript"
+    }
+  ],
+  "pinData": {
+    "When chat message received": [
+      {
+        "json": {
+          "sessionId": "9911750540264dcda84f0ff6617b9df4",
+          "action": "sendMessage",
+          "chatInput": "Please ideate and create a fb video ad for this offer, heres the landing page copy for context:\n\nFor Anyone Looking To Become Strong, mobile & Resilient New Counterintuitive Approach That Strengthens Joints & Prevents Injuries Without Hours of Exercise While also Improving Balance, Boosting Flexibility, And Increasing Overall Strength\n\nHit Play on The Video “Used By Olympic Athletes For Longevity!”\n\nWhat is the Resilience Method? Resilience is a counterintuitive movement program that strengthens your joints and prevents injuries, that allows you to build durable, injury-resistant joints, improve balance, and boost flexibility without spending hours at the gym or relying on complicated equipment.\n\nWe achieve this by applying targeted, gentle stress to your joints and connective tissues, which strengthens them over time without forcing you into high-intensity workouts or requiring expensive gear.\n\nAnd as a result, this frees you up to enjoy your favorite activities with confidence, knowing your body is protected – this is the Resilience Program.\n\nNOW AVAILABLE FOR INSTANT ACCESS resillience program jpg 1 Only A Few Days Left Only $39.00 $29.00 Save 25% today Access The Program For $39 Just $29.00! Delivered instantly. Start using it in the next 2 minutes.\n\nNow Available For Instant Access⬇\n\nGET ACCESS NOW 100% secure 256-bit encrypted checkout credit paypal.png 4 png image 34 1 png 14 Day Money Back Guarantee\n\n4.9 Excellent based on 1,011 reviews\n\nyellow Screenshot 2024 12 25 at 12.24.14 png The Resilience Program is a shortcut. Before I created Resilience, I was struggling with recurring injuries for years and was on the verge of giving up. I tried everything—hours of stretching, mobility routines, and strength training, but no matter how hard I worked, I couldn’t stop my body from breaking down.\n\nI found myself in a cycle I never signed up for—one injury after another, always feeling vulnerable and unsure if my body could handle the activities I loved.\n\nThis frustration led me to question everything. I turned the entire approach to joint health upside down, breaking all the rules and freeing myself from the outdated methods that weren’t working.\n\nAfter several years of trial and error—testing everything, and figuring things out the hard way—without anyone guiding me, I finally reached a point where I built durable, injury-resistant joints, improved my mobility, and became more resilient than ever before.\n\nNow, you have the opportunity to duplicate the entire Resilience system I built by joining the program that’s transformed over 100,000 people’s bodies.\n\nHere’s how it works:\n\nWhitney AC 1 Here’s What This Means for You and Your Body...\n\nNo More: ❌ Constant joint pain ❌ Fear of injuries holding you back ❌ Skipping workouts because you’re sore ❌ Frustration with slow recovery\n\nInstead, You’ll Get: ✅ Stronger, more resilient joints ✅ Improved balance and mobility ✅ Confidence to move without fear of injury ✅ Freedom to enjoy your favorite activities\n\nHere are a few stories from people who have transformed their bodies with the help of Resilience:\n\nHere’s a Few of Our Clients Results From Our Programs...\n\nHERE’S EVERYTHING INCLUDED: resillience program jpg 1 GMB Product Images Frame3 png THE RESILIENCE PROGRAM Strgnthen joints and prevent injuries while also Improving Balance, Boosting Flexibility, And Increasing Overall Strength\n\nGMB Product Images Frame4 png 34 VIDEO TUTORIALS Get access to 34 in-depth video tutorials, walking you through each movement step-by-step so you can master your joint durability training with confidence.\n\nINSTANT ACCESS PRICE: $37 FREE GMB Product Images Frame5 png ACCESS TO OUR PRAXIS PLATFORM Our custom-built Praxis platform is included, giving you an easy way to track your progress, schedule sessions, and revisit tutorials whenever you need.\n\nINSTANT ACCESS PRICE: $37 FREE GMB Product Images Frame6 png TRAINING SCHEDULE PLANNER Access to a customized training schedule planner to help you integrate Resilience into your weekly routine, ensuring you stay consistent and on track with your joint durability goals.\n\nINSTANT ACCESS PRICE: $37 FREE GMB Product Images Frame7 png SUPPORT FROM OUR EXPERT COACHES Have questions or need guidance? You’ll have access to expert coaching support throughout your journey, helping you get the most out of the Resilience program.\n\nINSTANT ACCESS PRICE: $37 FREE Only A Few Days Left Only $39.00 $29.00 Save 25% today Access The Program For $39 Just $29.00! Delivered instantly. Start using it in the next 2 minutes.\n\nNow Available For Instant Access\n\nGET ACCESS now for only $29! Get your access now! 100% secure 256-bit encrypted checkout 4.9 Excellent based on 1,011 reviews\n\nyellow Your paragraph text Your paragraph text 1 A few of the places we've been featured onnit logo mens fitness logo art of manliness logo esquire logo the guardian logo Limited Time - Download The Digital Version For Only $29.00 The Only System You’ll Ever Need To Build Strong, Injury-Resistant Joints and Move Freely We put everything we’ve learned, everything we use ourselves in this program so that you can learn from our mistakes, our wins, as well as benefitting from all the time, effort, and money that has gone into the experiences that made their way into this program.\n\nryan hip pain 34 Sessions Targeted routines for joint strength, mobility, and injury prevention.\n\nComplete Flexibility Sessions that fit your schedule—15 or 30-minute options designed for busy lives.\n\n1 Proven System Strengthen joints, improve balance, and protect your body—all in one easy-to-follow program.\n\nGET ACCESS Now for only $29.00 Get access now! guarantee badge Backed By Our Unconditional 14 Day Money Back Guarantee Step By Step Of How Resilience Works... Look, we can’t stop a piano from falling on your head or make your favorite activities any safer. So what can we do?\n\nTrain Your Joints to Resist Injury Apply targeted stress to toughen your joints Safely strengthen connective tendons and ligaments Create margin with greater range of motion Avoid Accidental Bumps and Falls Improve balance and proprioception Build comfort in moving on and off the floor Develop coordination and movement control Reduce the Severity of Accidental Injuries Absorb impacts safely to reduce force Condition joints and connective tissues for strain Acclimatize to discomfort so you can stay calm 72d210a9 longevity factors 1000000000000000000028 Some Of The Movements You'll Be Doing\n\n4.9 Excellent based on 1,011 reviews What Are Others Saying About Our Programs? “The Resilience Method Allowed Me To Move Freely With Confidence!”\n\nScreenshot 2024 10 24 at 15.11.21 Screenshot 2024 10 24 at 15.15.34 Screenshot 2024 10 24 at 15.15.16 Screenshot 2024 10 24 at 15.11.21 1 Screenshot 2024 10 24 at 15.03.54 Screenshot 2024 10 24 at 15.02.34 Here's Everything You're Getting For Only $29.00 Today GMB Product Images 1 GMB Product Images Frame3 The Resilience Program Strengthen joints and prevent injuries while also Improving Balance, Boosting Flexibility, And Increasing Overall Strength in your body!\n\nINSTANT ACCESS PRICE: $39 $29.00\n\nGMB Product Images Frame6 Customized Training Schedule Planner Access to a customized training schedule planner to help you integrate Resilience into your weekly routine, ensuring you stay consistent and on track with your joint durability goals.\n\nINSTANT ACCESS PRICE: $37 $0.00\n\nGMB Product Images Frame4 34 Video Tutorials Get access to 34 in-depth video tutorials, walking you through each movement step-by-step so you can master your joint durability training with confidence.\n\nINSTANT ACCESS PRICE: $37 $0.00\n\nGMB Product Images Frame7 Access to Support from Expert Coaches Have questions or need guidance? You’ll have access to expert coaching support throughout your journey, helping you get the most out of the Resilience program.\n\nINSTANT ACCESS PRICE: $37 $0.00\n\nGMB Product Images Frame5 Praxis Platform Access Our custom-built Praxis platform is included, giving you an easy way to track your progress, schedule sessions, and revisit tutorials whenever you need.\n\nINSTANT ACCESS PRICE: $37 $0.00\n\nGMB Product Images Frame2 Lifetime Access To Program Updates As part of your Resilience program membership, you’ll receive all future updates to the program for free, ensuring you always have the latest research and techniques at your fingertips.\n\nINSTANT ACCESS PRICE: $37 $0.00\n\nGET ACCESS Now for only $29.00 GET ACCESS NOW! guarantee badge Backed By Our Unconditional 14 Day Money Back Guarantee \"An ounce of prevention is worth a pound of cure.\" benjamin franklin editedjpg Benjamin Franklin Here's A Sneak Peak Of What's Inside The Members Area Program GMB Fitness™ 18 December 2024 1 1 guarantee badge Your Purchase Is Backed By Our Unconditional Money Back Guarantee I know that before I get into anything…\n\nI’d like to know what I’m buying and that it’s backed by a solid money-back guarantee.\n\nAnd I want you to be comfortable with this purchase.\n\nAnd even though it’s only $29.00 – you worked for that money and it counts.\n\nLike my grandpa used to say “Test drive the car before you drive it off the lot”…\n\nSo here’s what I’ve arranged:\n\nDownload the program, read it, but more importantly apply what you learn in there.\n\nAnd if you’re not blown away by what you learn.\n\nThen just shoot us an email at hi@gmb.io and request a refund within 14 days.\n\nWe’ll refund you your $29.00 and let you keep the Resilience program free of charge.\n\nHow’s that for a money back guarantee? I’d say pretty good!\n\nFrequently Asked Questions Need help? hi@gmb.io\n\nWho is this for? This program is for anyone who wants to protect their body and improve joint health, whether you’re an athlete, weekend warrior, or someone looking to stay active and injury-free. It’s ideal for people who want to build joint resilience, improve balance, and increase overall mobility—without needing hours in the gym or expensive equipment.\n\nWhat is Resilience? The Resilience Program is a solution to one of the most common challenges people face—staying injury-free while staying active. This program focuses on joint durability, balance, and mobility, applying gentle, targeted stress to your joints and connective tissues to strengthen them over time. It helps you condition your body to handle physical stress, reduce injury risk, and improve overall movement.\n\nDo you offer more in depth help? Yes, we offer additional support through our coaching community which you have the option to join where you can ask questions and get guidance directly from our expert coaches. If you want even more personalized help, you can upgrade your access to include private coaching sessions.\n\nWill Resilience make me literally bulletproof or turn me into some kind of invincible superman? When you integrate this practice into your regular routine, you’ll be teaching your body to adapt in realtime to odd forces and impacts. You’ll develop greater ability to absorb those shocks without trauma.\n\nBut don’t let it go to your head, OK?\n\nFalling less often, feeling unfazed after collisions, and remaining unscathed by accidents… these are great, but you don’t wanna get overconfident.\n\nResilience will make you tough-er, but we can only do so much…\n\nPlease still be responsible for your own safety and take good care of yourself. You deserve it, and so do the people who count on you 🙂\n\nHow is this different than other programs? Unlike most programs that focus solely on flexibility or strength, Resilience is designed to specifically target joint health and injury prevention. It’s not just about stretching or getting stronger—it’s about conditioning your joints and connective tissues to handle everyday activities and unexpected physical stress. With this program, you’ll build a body that’s more resilient and less prone to injury.\n\nI want this, what exactly am I getting? You’re getting access to the full Resilience program, which includes 34 joint durability 15-30 minute video sessions that you can do at home with no special equipment. Plus access to our custom Praxis platform for built-in scheduling, tracking, and coaching support.\n\nHow much space do I need? Resilience doesn’t require much space at all. Just enough room to sit, stand, lie down on the floor is enough.\n\nDo I need any kind of special equipment? Nope!\n\nJust a bit of floor. Maybe a chair or wall to help balance while you’re learning certain movements.\n\nA few other things you’ll need less often in the future: bandages, knee braces, crutches, etc. 🙂"
+        }
+      }
+    ]
+  },
+  "connections": {
+    "ParseOutput1": {
+      "main": [
+        [
+          {
+            "node": "VoiceOver1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "VoiceOver1": {
+      "main": [
+        [
+          {
+            "node": "Upload MP3.1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Caption",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTP Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Scripter1": {
+      "main": [
+        [
+          {
+            "node": "ParseOutput1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GETURL1": {
+      "main": [
+        [
+          {
+            "node": "VideoRendering1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "B-Rolling1": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge2": {
+      "main": [
+        [
+          {
+            "node": "GETURL1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GetDirectURL1": {
+      "main": [
+        [
+          {
+            "node": "B-Rolling1",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "VideoRendering1": {
+      "main": [
+        [
+          {
+            "node": "60secs1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GetVideo1": {
+      "main": [
+        [
+          {
+            "node": "Merge3",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "60secs1": {
+      "main": [
+        [
+          {
+            "node": "GetVideo1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GetBinary1": {
+      "main": [
+        [
+          {
+            "node": "Upload Video Ad1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload SRT1": {
+      "main": [
+        [
+          {
+            "node": "Get srt.URL1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge3": {
+      "main": [
+        [
+          {
+            "node": "Caption Overlay1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait1": {
+      "main": [
+        [
+          {
+            "node": "Get Video1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get srt.URL1": {
+      "main": [
+        [
+          {
+            "node": "Merge3",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Caption Overlay1": {
+      "main": [
+        [
+          {
+            "node": "Wait1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Video1": {
+      "main": [
+        [
+          {
+            "node": "GetBinary1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Upload MP3.1": {
+      "main": [
+        [
+          {
+            "node": "GetDirectURL1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Convert to File1": {
+      "main": [
+        [
+          {
+            "node": "Upload SRT1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Caption": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 2
+          },
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Convert to File1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "When chat message received": {
+      "main": [
+        [
+          {
+            "node": "Scripter1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Merge2",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "40077084-f3e8-4284-a70c-13b33fcf0f3b",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "acdc6969362e26d38b948eed7dca3936a656f8ac8cc8d81322522f8b8dbdc19a"
+  },
+  "nodeGroups": [],
+  "id": "DuzPMJW_MO4_T5dyCIqiA",
+  "tags": []
+}
